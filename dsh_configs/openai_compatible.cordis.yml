@@ -76,6 +76,13 @@
 - id: tool-fs
   name: '@deepseek-ai/dsh-tool-fs'
 
+- id: writer-director-pre-execute
+  name: ./dsh_director_hook.mjs
+  config:
+    pythonBin: !!js process.env.DSH_DIRECTOR_PYTHON
+    bridgePath: !!js process.env.DSH_DIRECTOR_BRIDGE
+    timeoutMs: 10000
+
 - id: token-meter
   name: '@deepseek-ai/dsh-token-meter'
 

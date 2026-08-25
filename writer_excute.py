@@ -383,10 +383,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dsh-model", default=os.environ.get("DSH_MODEL"), help="DeepSeek Harness 模型")
     parser.add_argument("--dsh-base-url", default=os.environ.get("DEEPSEEK_BASE_URL"), help="DeepSeek Harness API base URL")
     parser.add_argument("--dsh-runtime-bin", default=os.environ.get("DSH_RUNTIME_BIN"), help="DeepSeek Harness SDK runtime 可执行文件路径")
+    parser.add_argument("--dsh-cwd", default=os.environ.get("DSH_CWD"), help="DeepSeek Harness 工具工作目录")
     parser.add_argument("--dsh-runtime-cwd", default=os.environ.get("DSH_RUNTIME_CWD"), help="DeepSeek Harness runtime 工作目录")
     parser.add_argument("--dsh-session-root", default=os.environ.get("DSH_SESSION_ROOT"), help="DeepSeek Harness 会话持久化目录")
+    parser.add_argument("--dsh-session-id", default=os.environ.get("DSH_SESSION_ID"), help="DeepSeek Harness 会话 ID")
+    parser.add_argument("--dsh-session-id-per-execute", action="store_true", help="每次 execute 在会话 ID 后追加轮次")
     parser.add_argument("--dsh-cordis", default=os.environ.get("DSH_CORDIS"), help="DeepSeek Harness Cordis 配置文件路径")
     parser.add_argument("--dsh-request-timeout", type=float, default=os.environ.get("DSH_REQUEST_TIMEOUT"), help="DeepSeek Harness 单个 RPC 请求超时秒数")
+    parser.add_argument("--dsh-director-stage", default=os.environ.get("DSH_DIRECTOR_STAGE"), help="传给 Director 钩子的执行阶段标记")
     parser.add_argument("--execute-output-format", default=None, help="覆盖真实执行阶段演员 Harness 输出格式，如 text / json / stream-json")
     parser.add_argument("--skip-execute", action="store_true", help="仅运行剧本生成与评估，不进入真实执行阶段")
     parser.add_argument("--json", action="store_true", help="以 JSON 摘要形式输出结果")
@@ -450,10 +454,21 @@ def append_actor_harness_args(command: list[str], args, output_format: str | Non
             ("--actor-model", "actor_model"),
             ("--actor-base-url", "actor_base_url"),
             ("--actor-api-key", "actor_api_key"),
+            ("--dsh-provider", "dsh_provider"),
+            ("--dsh-cwd", "dsh_cwd"),
+            ("--dsh-runtime-cwd", "dsh_runtime_cwd"),
+            ("--dsh-session-root", "dsh_session_root"),
+            ("--dsh-session-id", "dsh_session_id"),
+            ("--dsh-cordis", "dsh_cordis"),
+            ("--dsh-runtime-bin", "dsh_runtime_bin"),
+            ("--dsh-request-timeout", "dsh_request_timeout"),
+            ("--dsh-director-stage", "dsh_director_stage"),
         ):
             value = getattr(args, attribute, None)
             if value is not None:
                 command.extend([option, str(value)])
+        if getattr(args, "dsh_session_id_per_execute", False):
+            command.append("--dsh-session-id-per-execute")
     return command
 
 
@@ -543,6 +558,7 @@ def summarize_writer_result(result: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "actor_backend": actor_backend,
         "actor_run_metadata": result.get("actor_run_metadata"),
+        "writer_usage": result.get("writer_usage") or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "request_count": 0},
         "ok": result.get("ok"),
         "return_code": result.get("return_code"),
         "stderr": result.get("stderr", ""),

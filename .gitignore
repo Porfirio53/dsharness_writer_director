@@ -8,3 +8,5 @@ __pycache__/
 .dbg/
 logs/
 dsh-result.json
+results/runs/
+results/full/

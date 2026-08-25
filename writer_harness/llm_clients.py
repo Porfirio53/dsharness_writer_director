@@ -27,6 +27,7 @@ class OpenAICompatibleClient(LLMClient):
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.temperature = temperature
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "request_count": 0}
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """调用真实模型生成编剧 Harness 的动态执行剧本。"""
@@ -46,6 +47,11 @@ class OpenAICompatibleClient(LLMClient):
             ],
         )
         content = response.choices[0].message.content or ""
+        usage = response.usage
+        self.usage["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
+        self.usage["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
+        self.usage["total_tokens"] += int(getattr(usage, "total_tokens", 0) or 0)
+        self.usage["request_count"] += 1
         # #region debug-point A:response-shape
         exec("try:\n import json as _j, urllib.request as _u, time as _t\n _p='.dbg/empty-judge-output.env'; _c=open(_p, encoding='utf-8').read(); _url=next((x.split('=',1)[1] for x in _c.splitlines() if x.startswith('DEBUG_SERVER_URL=')), 'http://127.0.0.1:7777/event'); _sid=next((x.split('=',1)[1] for x in _c.splitlines() if x.startswith('DEBUG_SESSION_ID=')), 'empty-judge-output'); _choice=response.choices[0]; _reasoning=getattr(_choice.message, 'reasoning_content', '') or ''; _u.urlopen(_u.Request(_url, data=_j.dumps({'sessionId': _sid, 'runId': 'pre-fix', 'hypothesisId': 'A', 'location': 'writer_harness/llm_clients.py:50', 'msg': '[DEBUG] writer evaluator response shape', 'data': {'content_length': len(content), 'finish_reason': getattr(_choice, 'finish_reason', None), 'reasoning_content_length': len(_reasoning), 'reasoning_starts_json': _reasoning.lstrip().startswith('{'), 'response_model': getattr(response, 'model', None)}, 'ts': int(_t.time() * 1000)}).encode(), headers={'Content-Type':'application/json'}), timeout=1).read()\nexcept: pass")
         # #endregion

@@ -75,6 +75,37 @@ class DirectorHarness:
         """返回关联到指定 OpenHarness 工具调用的 Director 事件副本。"""
         return [event for event in self._event_log.events if event.tool_use_id == tool_use_id]
 
+    def preflight_registered_tool(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, object],
+        session_id: str,
+        tool_use_id: str,
+        backend: str,
+    ) -> DirectorDecision:
+        """在不暴露后端注册表对象时预检一个已注册工具。
+
+        DeepSeek Harness 只会为已经注册、即将 dispatch 的工具触发
+        ``tools/pre-execute``。因此该入口负责记录真实的执行前放行，不复用
+        OpenHarness 专属的 MCP 动态注册路径。
+        """
+
+        self._emit(
+            "tool_check",
+            tool_name,
+            "passed",
+            "工具已由 DeepSeek Harness 注册；Director 在 tools/pre-execute 阶段放行",
+            session_id,
+            {
+                "backend": backend,
+                "argument_keys": sorted(str(key) for key in tool_input),
+                "mcp_repair_supported": False,
+            },
+            tool_use_id,
+        )
+        return DirectorDecision("allow")
+
     async def preflight(self, request: DirectorRequest) -> DirectorDecision:
         """检查一次即将执行的工具调用，并决定放行、阻断或替换。
 

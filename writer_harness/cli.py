@@ -40,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--actor-api-key", default=None, help="演员 Harness API key")
     parser.add_argument("--actor-api-format", default=None, help="演员 Harness 使用 OpenHarness 时，覆盖其 API format，如 anthropic / openai / copilot")
     parser.add_argument("--actor-output-format", default=None, help="演员 Harness 使用 OpenHarness 时，覆盖其输出格式，如 text / json / stream-json")
+    parser.add_argument("--dsh-provider", default=None, help="DeepSeek Harness provider")
+    parser.add_argument("--dsh-cwd", default=None, help="DeepSeek Harness 工具工作目录")
+    parser.add_argument("--dsh-runtime-cwd", default=None, help="DeepSeek Harness runtime 进程目录")
+    parser.add_argument("--dsh-session-root", default=None, help="DeepSeek Harness 会话目录")
+    parser.add_argument("--dsh-session-id", default=None, help="DeepSeek Harness 会话 ID")
+    parser.add_argument("--dsh-session-id-per-execute", action="store_true", help="每次 execute 在会话 ID 后追加轮次")
+    parser.add_argument("--dsh-cordis", default=None, help="DeepSeek Harness Cordis 配置")
+    parser.add_argument("--dsh-runtime-bin", default=None, help="DeepSeek Harness runtime 可执行文件")
+    parser.add_argument("--dsh-request-timeout", type=float, default=None, help="DeepSeek Harness RPC 超时秒数")
+    parser.add_argument("--dsh-director-stage", default=None, help="传给 Director 钩子的执行阶段标记")
     parser.add_argument("--save-final-prompt", default=None, help="保存最终交给演员 Harness 的 prompt")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出执行结果摘要")
     return parser
@@ -71,6 +81,16 @@ def build_actor_executor(args: argparse.Namespace):
             model=args.actor_model,
             base_url=args.actor_base_url,
             api_key=args.actor_api_key,
+            provider=args.dsh_provider,
+            cwd=args.dsh_cwd,
+            runtime_cwd=args.dsh_runtime_cwd,
+            session_root=args.dsh_session_root,
+            session_id=args.dsh_session_id,
+            session_id_per_execute=args.dsh_session_id_per_execute,
+            cordis=args.dsh_cordis,
+            runtime_bin=args.dsh_runtime_bin,
+            request_timeout_seconds=args.dsh_request_timeout,
+            director_stage=args.dsh_director_stage,
         )
     return OpenHarnessCLIActorExecutor(
         oh_bin=args.oh_bin,
@@ -159,6 +179,11 @@ def main() -> None:
                 "actor_backend": result.actor_backend,
                 "actor_run_metadata": result.actor_run_metadata,
                 "tool_trace": result.tool_trace,
+                "writer_usage": (
+                    dict(getattr(writer_harness.llm_client, "usage", {}))
+                    if writer_harness is not None
+                    else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "request_count": 0}
+                ),
             }
         )
         return

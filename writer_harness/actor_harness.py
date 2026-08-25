@@ -72,6 +72,7 @@ def extract_tool_trace_from_dsh_events(events: list[Any]) -> dict[str, Any]:
                     pass
             call = {
                 "sequence_index": sequence_index,
+                "started_at": event.get("time"),
                 "call_id": call_id or None,
                 "tool_name": tool_name,
                 "turn": data.get("turn"),
@@ -82,6 +83,8 @@ def extract_tool_trace_from_dsh_events(events: list[Any]) -> dict[str, Any]:
                 "result": None,
                 "error": None,
                 "meta": None,
+                "completion_sequence_index": None,
+                "completed_at": None,
             }
             tool_calls.append(call)
             if call_id:
@@ -110,6 +113,8 @@ def extract_tool_trace_from_dsh_events(events: list[Any]) -> dict[str, Any]:
                 call["result"] = result
                 call["error"] = error
                 call["meta"] = data.get("meta")
+                call["completion_sequence_index"] = sequence_index
+                call["completed_at"] = event.get("time")
             tool_events.append(
                 {
                     "type": "tool_completed",
@@ -284,22 +289,39 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        provider: str | None = None,
+        cwd: str | None = None,
+        runtime_cwd: str | None = None,
+        session_root: str | None = None,
+        session_id: str | None = None,
+        session_id_per_execute: bool = False,
+        cordis: str | None = None,
+        runtime_bin: str | None = None,
+        request_timeout_seconds: float | None = None,
+        director_stage: str | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.project_root = Path(__file__).resolve().parents[1]
-        self.provider = "actor-openai-compatible"
-        self.runtime_cwd = str(self.project_root)
-        self.session_root = str(self.project_root / ".dsh-sessions")
-        self.cordis = str(self.project_root / "dsh_configs" / "openai_compatible.cordis.yml")
+        self.provider = provider or "actor-openai-compatible"
+        self.cwd = str(Path(cwd).resolve()) if cwd else str(self.project_root)
+        self.runtime_cwd = str(Path(runtime_cwd).resolve()) if runtime_cwd else self.cwd
+        self.session_root = str(Path(session_root).resolve()) if session_root else str(self.project_root / ".dsh-sessions")
+        self.session_id = session_id
+        self.session_id_per_execute = session_id_per_execute
+        self.cordis = str(Path(cordis).resolve()) if cordis else str(self.project_root / "dsh_configs" / "openai_compatible.cordis.yml")
+        self.runtime_bin = str(Path(runtime_bin).resolve()) if runtime_bin else None
+        self.request_timeout_seconds = request_timeout_seconds
+        self.director_stage = director_stage
+        self._execute_count = 0
 
     def execute(self, prompt: str, mode: InteractionMode, script_report: WriterHarnessReport | None = None) -> ExecutionResult:
         try:
             harness_class = self._load_harness_class()
             kwargs = self._build_harness_kwargs()
             with harness_class(**kwargs) as harness:
-                run = harness.run(prompt)
+                run = harness.run(prompt, session_id=self._next_session_id())
         except Exception as exc:
             return ExecutionResult(
                 ok=False,
@@ -368,6 +390,9 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
                 "session_id": getattr(run, "session_id", None),
                 "finish_reason": finish_reason,
                 "session_root": getattr(run, "session_root", None),
+                "cwd": self.cwd,
+                "runtime_cwd": self.runtime_cwd,
+                "cordis": self.cordis,
                 "events": events,
                 "notifications": notifications,
             },
@@ -386,19 +411,35 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
     def _build_harness_kwargs(self) -> dict[str, Any]:
         Path(self.session_root).mkdir(parents=True, exist_ok=True)
         kwargs: dict[str, Any] = {}
+        runtime_env = {
+            "DEEPSEEK_API_KEY": self.api_key or "",
+            "DEEPSEEK_BASE_URL": self.base_url or "",
+            "DEEPSEEK_MODEL": self.model or "",
+        }
+        if self.session_id:
+            runtime_env["DSH_DIRECTOR_SESSION_ID"] = self.session_id
+        if self.director_stage:
+            runtime_env["DSH_DIRECTOR_STAGE"] = self.director_stage
         optional_values = {
             "model": self.model,
             "provider": self.provider,
             "base_url": self.base_url,
             "api_key": self.api_key,
+            "cwd": self.cwd,
             "runtime_cwd": self.runtime_cwd,
             "session_root": self.session_root,
             "cordis": self.cordis,
-            "env": {
-                "DEEPSEEK_API_KEY": self.api_key or "",
-                "DEEPSEEK_BASE_URL": self.base_url or "",
-                "DEEPSEEK_MODEL": self.model or "",
-            },
+            "runtime_bin": self.runtime_bin,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "env": runtime_env,
         }
         kwargs.update({key: value for key, value in optional_values.items() if value is not None})
         return kwargs
+
+    def _next_session_id(self) -> str | None:
+        if not self.session_id:
+            return None
+        if not self.session_id_per_execute:
+            return self.session_id
+        self._execute_count += 1
+        return f"{self.session_id}-{self._execute_count:02d}"
