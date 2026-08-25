@@ -1,0 +1,4 @@
+deepseek-harness-sdk==0.1.1rc1
+openai==3.3.1
+python-dotenv==1.2.3
+socksio==1.0.0

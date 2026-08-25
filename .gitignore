@@ -1,0 +1,10 @@
+.env
+.venv/
+.dsh-sessions/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.jsonl
+.dbg/
+logs/
+dsh-result.json
