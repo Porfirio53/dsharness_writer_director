@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from harnessbench.adapters import (
     CodexAdapter,
+    DeepSeekWriterDirectorAdapter,
     DemoAdapter,
     FairyClawAdapter,
     GenericCliAdapter,
@@ -18,6 +19,8 @@ from harnessbench.adapters.base import BaseAdapter
 
 
 def build_adapter(adapter_name: str) -> BaseAdapter:
+    if adapter_name == "deepseek_writer_director":
+        return DeepSeekWriterDirectorAdapter()
     if adapter_name == "codex":
         return CodexAdapter()
     if adapter_name == "demo":

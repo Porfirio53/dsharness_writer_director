@@ -12,3 +12,7 @@ class BaseAdapter(ABC):
     def run(self, ctx: AdapterRunContext) -> AdapterRunResult:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release optional task-scoped resources after all rounds finish."""
+
+        return None

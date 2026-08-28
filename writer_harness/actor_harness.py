@@ -299,6 +299,7 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
         runtime_bin: str | None = None,
         request_timeout_seconds: float | None = None,
         director_stage: str | None = None,
+        persistent_runtime: bool = False,
     ) -> None:
         self.model = model
         self.base_url = base_url
@@ -314,14 +315,22 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
         self.runtime_bin = str(Path(runtime_bin).resolve()) if runtime_bin else None
         self.request_timeout_seconds = request_timeout_seconds
         self.director_stage = director_stage
+        self.persistent_runtime = persistent_runtime
         self._execute_count = 0
+        self._persistent_harness: Any | None = None
 
     def execute(self, prompt: str, mode: InteractionMode, script_report: WriterHarnessReport | None = None) -> ExecutionResult:
         try:
             harness_class = self._load_harness_class()
             kwargs = self._build_harness_kwargs()
-            with harness_class(**kwargs) as harness:
-                run = harness.run(prompt, session_id=self._next_session_id())
+            if self.persistent_runtime:
+                if self._persistent_harness is None:
+                    self._persistent_harness = harness_class(**kwargs)
+                    self._persistent_harness.start()
+                run = self._persistent_harness.run(prompt, session_id=self._next_session_id())
+            else:
+                with harness_class(**kwargs) as harness:
+                    run = harness.run(prompt, session_id=self._next_session_id())
         except Exception as exc:
             return ExecutionResult(
                 ok=False,
@@ -398,6 +407,14 @@ class DeepSeekHarnessActorExecutor(ActorHarnessExecutor):
             },
             tool_trace=tool_trace,
         )
+
+    def close(self) -> None:
+        """Close a task-scoped persistent DeepSeek Harness runtime, if one exists."""
+
+        harness = self._persistent_harness
+        self._persistent_harness = None
+        if harness is not None:
+            harness.close()
 
     def _load_harness_class(self) -> Any:
         try:

@@ -1,6 +1,7 @@
 from harnessbench.adapters.base import BaseAdapter
 from harnessbench.adapters.codex import CodexAdapter
 from harnessbench.adapters.demo import DemoAdapter
+from harnessbench.adapters.deepseek_writer_director import DeepSeekWriterDirectorAdapter
 from harnessbench.adapters.fairyclaw import FairyClawAdapter
 from harnessbench.adapters.generic_cli import GenericCliAdapter
 from harnessbench.adapters.moltis import MoltisAdapter
@@ -16,6 +17,7 @@ __all__ = [
     "BaseAdapter",
     "CodexAdapter",
     "DemoAdapter",
+    "DeepSeekWriterDirectorAdapter",
     "GenericCliAdapter",
     "NanoBotAdapter",
     "NanoClawAdapter",

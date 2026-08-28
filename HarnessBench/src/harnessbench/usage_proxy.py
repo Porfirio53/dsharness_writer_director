@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import threading
+import time
 import zlib
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -240,18 +241,30 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
         response_body = b""
         status = 500
         response_headers: list[tuple[str, str]] = []
-        try:
-            with urlopen(req, timeout=1200) as resp:
-                status = resp.status
-                response_body = resp.read()
-                response_headers = list(resp.headers.items())
-        except HTTPError as exc:
-            status = exc.code
-            response_body = exc.read()
-            response_headers = list(exc.headers.items())
-        except URLError as exc:
-            self.send_error(502, f"proxy upstream error: {exc.reason}")
-            return
+        upstream_attempts = 0
+        for attempt in range(1, 4):
+            upstream_attempts = attempt
+            try:
+                with urlopen(req, timeout=1200) as resp:
+                    status = resp.status
+                    response_body = resp.read()
+                    response_headers = list(resp.headers.items())
+                break
+            except HTTPError as exc:
+                status = exc.code
+                response_body = exc.read()
+                response_headers = list(exc.headers.items())
+                if status in {408, 429, 500, 502, 503, 504} and attempt < 3:
+                    time.sleep(float(attempt))
+                    continue
+                break
+            except OSError as exc:
+                if attempt < 3:
+                    time.sleep(float(attempt))
+                    continue
+                reason = exc.reason if isinstance(exc, URLError) else str(exc)
+                self.send_error(502, f"proxy upstream error after {attempt} attempts: {reason}")
+                return
 
         try:
             self.send_response(status)
@@ -276,6 +289,7 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
             "path": remainder,
             "method": self.command,
             "status": status,
+            "upstream_attempts": upstream_attempts,
         }
         decoded_text = _decode_response_body(response_body, response_headers)
         logged_response_text = _redact_sensitive_values(decoded_text, self.headers)
@@ -293,6 +307,7 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
             "path": remainder,
             "method": self.command,
             "status": status,
+            "upstream_attempts": upstream_attempts,
             "request_headers": _request_headers_for_log(self.headers),
             "request_body": _redact_sensitive_values(
                 body.decode("utf-8", errors="replace"),

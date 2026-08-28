@@ -528,49 +528,52 @@ def run_task(app: AppConfig, task: TaskSpec, model_id: str, model_cfg: dict[str,
     proxy_routes = proxy_dir / "routes.json"
     proxy_log = proxy_dir / "requests.jsonl"
     proxy_raw_dir = proxy_dir / "responses"
-    with UsageProxy(proxy_routes, proxy_log, proxy_raw_dir, task.task_id, session_id, model_id) as proxy:
-        runtime_env["HARNESSBENCH_LLM_PROXY_URL"] = proxy.base_url
-        runtime_env["HARNESSBENCH_LLM_PROXY_ROUTES"] = str(proxy_routes)
-        for round_index, prompt_name in enumerate(prompt_names):
-            prompt = render_prompt_file(task, prompt_name, workspace, runtime_env, adapter_name)
-            prompt_file = sandbox / f"prompt-round{round_index + 1}.txt"
-            prompt_file.write_text(prompt, encoding="utf-8")
-            ctx = AdapterRunContext(
-                task=task,
-                workspace=workspace,
-                sandbox=sandbox,
-                prompt=prompt,
-                prompt_file=prompt_file,
-                session_id=session_id,
-                timeout_sec=int(model_cfg.get("timeout_sec", task.timeout_sec or app.default_timeout_sec)),
-                env=runtime_env,
-                model_id=model_id,
-                model_config=model_cfg,
-                mode=mode,
-            )
-            adapter_result = adapter.run(ctx)
-            adapter_results.append(adapter_result)
-            if hooks and callable(getattr(hooks, "after_round", None)):
-                after_state = hooks.after_round(
-                    {
-                        "task": task,
-                        "sandbox": sandbox,
-                        "workspace": workspace,
-                        "session_id": session_id,
-                        "round_index": round_index,
-                        "prompt_file": prompt_file,
-                        "prompt_name": prompt_name,
-                    },
-                    runtime_state,
-                    adapter_result,
+    try:
+        with UsageProxy(proxy_routes, proxy_log, proxy_raw_dir, task.task_id, session_id, model_id) as proxy:
+            runtime_env["HARNESSBENCH_LLM_PROXY_URL"] = proxy.base_url
+            runtime_env["HARNESSBENCH_LLM_PROXY_ROUTES"] = str(proxy_routes)
+            for round_index, prompt_name in enumerate(prompt_names):
+                prompt = render_prompt_file(task, prompt_name, workspace, runtime_env, adapter_name)
+                prompt_file = sandbox / f"prompt-round{round_index + 1}.txt"
+                prompt_file.write_text(prompt, encoding="utf-8")
+                ctx = AdapterRunContext(
+                    task=task,
+                    workspace=workspace,
+                    sandbox=sandbox,
+                    prompt=prompt,
+                    prompt_file=prompt_file,
+                    session_id=session_id,
+                    timeout_sec=int(model_cfg.get("timeout_sec", task.timeout_sec or app.default_timeout_sec)),
+                    env=runtime_env,
+                    model_id=model_id,
+                    model_config=model_cfg,
+                    mode=mode,
                 )
-                if isinstance(after_state, dict):
-                    runtime_state.update(after_state)
-                    for key, value in after_state.items():
-                        if isinstance(value, str):
-                            runtime_env[key] = value
-            if not adapter_result.ok:
-                break
+                adapter_result = adapter.run(ctx)
+                adapter_results.append(adapter_result)
+                if hooks and callable(getattr(hooks, "after_round", None)):
+                    after_state = hooks.after_round(
+                        {
+                            "task": task,
+                            "sandbox": sandbox,
+                            "workspace": workspace,
+                            "session_id": session_id,
+                            "round_index": round_index,
+                            "prompt_file": prompt_file,
+                            "prompt_name": prompt_name,
+                        },
+                        runtime_state,
+                        adapter_result,
+                    )
+                    if isinstance(after_state, dict):
+                        runtime_state.update(after_state)
+                        for key, value in after_state.items():
+                            if isinstance(value, str):
+                                runtime_env[key] = value
+                if not adapter_result.ok:
+                    break
+    finally:
+        adapter.close()
 
     assert adapter_result is not None
     usage_summary = _collect_proxy_usage_summary(proxy_log, session_id)

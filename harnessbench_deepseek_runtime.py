@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ from writer_excute import (
     run_writer_harness,
     summarize_writer_result,
 )
+from writer_harness.actor_harness import DeepSeekHarnessActorExecutor
+from writer_harness.models import InteractionMode
 
 RESULT_LABEL = "DeepSeekHarness-compatible local result"
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -64,6 +67,67 @@ class HarnessBenchRoundResult:
     director_event_validation: dict[str, Any] | None
     director_events: tuple[dict[str, Any], ...]
     director_log_file: str | None
+
+
+class HarnessBenchTaskActor:
+    """Own one live DeepSeek Harness runtime for every round of one task."""
+
+    def __init__(self) -> None:
+        self._executor: DeepSeekHarnessActorExecutor | None = None
+        self._signature: tuple[str, ...] | None = None
+
+    def execute(self, args: SimpleNamespace, prompt: str) -> dict[str, Any]:
+        signature = (
+            str(args.actor_model or ""),
+            str(args.actor_base_url or ""),
+            str(args.dsh_provider or ""),
+            str(args.dsh_cwd or ""),
+            str(args.dsh_runtime_cwd or ""),
+            str(args.dsh_session_root or ""),
+            str(args.dsh_session_id or ""),
+            str(args.dsh_cordis or ""),
+            str(args.dsh_runtime_bin or ""),
+            str(args.dsh_director_stage or ""),
+        )
+        if self._signature is not None and signature != self._signature:
+            raise RuntimeError("DeepSeek Harness task runtime configuration changed between rounds")
+        if self._executor is None:
+            self._signature = signature
+            self._executor = DeepSeekHarnessActorExecutor(
+                model=args.actor_model,
+                base_url=args.actor_base_url,
+                api_key=args.actor_api_key,
+                provider=args.dsh_provider,
+                cwd=args.dsh_cwd,
+                runtime_cwd=args.dsh_runtime_cwd,
+                session_root=args.dsh_session_root,
+                session_id=args.dsh_session_id,
+                session_id_per_execute=False,
+                cordis=args.dsh_cordis,
+                runtime_bin=args.dsh_runtime_bin,
+                request_timeout_seconds=args.dsh_request_timeout,
+                director_stage=args.dsh_director_stage,
+                persistent_runtime=True,
+            )
+        result = self._executor.execute(prompt, InteractionMode.VANILLA)
+        return {
+            "ok": result.ok,
+            "mode": result.mode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "return_code": result.return_code,
+            "final_prompt": result.final_prompt,
+            "actor_backend": result.actor_backend,
+            "actor_run_metadata": result.actor_run_metadata,
+            "tool_trace": result.tool_trace,
+        }
+
+    def close(self) -> None:
+        executor = self._executor
+        self._executor = None
+        self._signature = None
+        if executor is not None:
+            executor.close()
 
 
 def _safe_segment(value: str, fallback: str) -> str:
@@ -116,6 +180,22 @@ def _planning_state_unchanged(before: Mapping[str, str], after: Mapping[str, str
             continue
         return False
     return True
+
+
+def _replace_path(value: Any, source: Path, target: Path) -> Any:
+    """Replace an isolated planning path in nested Writer output."""
+
+    source_text = str(source.resolve())
+    target_text = str(target.resolve())
+    if isinstance(value, str):
+        return value.replace(source_text, target_text)
+    if isinstance(value, list):
+        return [_replace_path(item, source, target) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_path(item, source, target) for item in value)
+    if isinstance(value, dict):
+        return {key: _replace_path(item, source, target) for key, item in value.items()}
+    return value
 
 
 def _validate(config: HarnessBenchRoundConfig) -> None:
@@ -188,6 +268,7 @@ def _build_args(
     session_id: str,
     session_per_execute: bool,
     director_stage: str,
+    dsh_cwd: Path | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         actor_backend="deepseek-harness",
@@ -201,7 +282,7 @@ def _build_args(
         actor_output_format=None,
         execute_output_format=None,
         dsh_provider="actor-openai-compatible",
-        dsh_cwd=str(config.workspace.resolve()),
+        dsh_cwd=str((dsh_cwd or config.workspace).resolve()),
         dsh_runtime_cwd=str(config.project_root.resolve()),
         dsh_session_root=str(session_root.resolve()),
         dsh_session_id=session_id,
@@ -295,7 +376,11 @@ def _director_validation(
     }
 
 
-def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchRoundResult:
+def execute_harnessbench_round(
+    config: HarnessBenchRoundConfig,
+    *,
+    task_actor: HarnessBenchTaskActor | None = None,
+) -> HarnessBenchRoundResult:
     _validate(config)
     state_root = config.sandbox.resolve() / "deepseek-harnessbench"
     session_root = state_root / "sessions"
@@ -333,6 +418,13 @@ def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchR
     os.environ["DIRECTOR_LOG_PATH"] = str(director_log)
     os.environ["DIRECTOR_HARNESS_ENABLED"] = "false"
 
+    planning_workspace = state_root / "writer-workspaces" / round_tag / "workspace"
+    planning_workspace.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(config.workspace, planning_workspace, dirs_exist_ok=True)
+    planning_prompt = prompt.replace(
+        str(config.workspace.resolve()),
+        str(planning_workspace.resolve()),
+    )
     planning_args = _build_args(
         config,
         writer_base_url=writer_base_url,
@@ -341,15 +433,25 @@ def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchR
         session_id=f"{config.session_id}-writer-{round_tag}",
         session_per_execute=True,
         director_stage="writer",
+        dsh_cwd=planning_workspace,
     )
     before = _workspace_snapshot(config.workspace)
-    writer_result = run_writer_harness(planning_args, "writer_harness", prompt, config.project_root)
+    writer_result = run_writer_harness(
+        planning_args,
+        "writer_harness",
+        planning_prompt,
+        config.project_root,
+    )
     after = _workspace_snapshot(config.workspace)
     writer_state_unchanged = _planning_state_unchanged(before, after)
     if not writer_state_unchanged:
         raise RuntimeError("Writer planning changed the HarnessBench workspace before Actor execution")
-    writer_result["query"] = prompt
-    summary = summarize_writer_result(writer_result)
+    writer_result["query"] = planning_prompt
+    summary = _replace_path(
+        summarize_writer_result(writer_result),
+        planning_workspace,
+        config.workspace,
+    )
     summary["query"] = prompt
     decision = decide_execution(summary)
     if not decision.should_execute or not decision.execution_prompt:
@@ -365,6 +467,7 @@ def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchR
             "session_id": config.session_id,
             "writer_session_id": (summary.get("actor_run_metadata") or {}).get("session_id"),
             "writer_model": config.writer_model,
+            "planning_workspace": str(planning_workspace),
             "writer_usage": summary.get("writer_usage") or {},
             "final_script_report": summary.get("final_script_report"),
             "online_completeness_judgment": summary.get("online_completeness_judgment"),
@@ -375,6 +478,7 @@ def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchR
     )
 
     actor_args = copy.copy(planning_args)
+    actor_args.dsh_cwd = str(config.workspace.resolve())
     actor_args.dsh_session_id = config.session_id
     actor_args.dsh_session_id_per_execute = False
     actor_args.dsh_director_stage = "actor"
@@ -382,7 +486,14 @@ def execute_harnessbench_round(config: HarnessBenchRoundConfig) -> HarnessBenchR
     os.environ["DIRECTOR_HARNESS_ENABLED"] = (
         "true" if config.director_harness_enabled else "false"
     )
-    execution_result = run_execute_stage(actor_args, decision.execution_prompt, config.project_root)
+    if task_actor is None:
+        execution_result = run_execute_stage(
+            actor_args,
+            decision.execution_prompt,
+            config.project_root,
+        )
+    else:
+        execution_result = task_actor.execute(actor_args, decision.execution_prompt)
     tool_trace = execution_result.get("tool_trace") or {}
     director_events = _read_jsonl(director_log)[director_offset:]
     for event in director_events:

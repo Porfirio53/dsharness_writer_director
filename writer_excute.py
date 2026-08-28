@@ -28,7 +28,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
@@ -234,15 +234,26 @@ def has_executable_final_script(summary: dict[str, Any]) -> bool:
     recommended_steps = execution_plan.get("recommended_steps")
     validation_steps = execution_plan.get("validation_steps")
     execution_suggestion = report.get("execution_suggestion")
+
+    def has_step(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, Mapping):
+            return any(
+                isinstance(value.get(key), str) and bool(str(value[key]).strip())
+                for key in ("execution", "action", "goal", "step", "description")
+            )
+        return False
+
     return (
         isinstance(task_goal, str)
         and bool(task_goal.strip())
         and isinstance(expected_output, str)
         and bool(expected_output.strip())
         and isinstance(recommended_steps, list)
-        and any(isinstance(step, str) and step.strip() for step in recommended_steps)
+        and any(has_step(step) for step in recommended_steps)
         and isinstance(validation_steps, list)
-        and any(isinstance(step, str) and step.strip() for step in validation_steps)
+        and any(has_step(step) for step in validation_steps)
         and isinstance(execution_suggestion, str)
         and bool(execution_suggestion.strip())
     )

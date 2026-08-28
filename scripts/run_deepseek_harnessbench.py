@@ -182,6 +182,7 @@ def _writer_deployment(
         "director_harness/harness.py",
         "dsh_configs/openai_compatible.cordis.yml",
         "harnessbench_deepseek_runtime.py",
+        "HarnessBench/src/harnessbench/adapters/deepseek_writer_director.py",
     )
     missing = [relative for relative in required if not (workspace_root / relative).is_file()]
     if missing:
@@ -306,8 +307,17 @@ def _source_hashes(project_root: Path) -> dict[str, str]:
 
 
 def _harnessbench_source_hashes(harnessbench_root: Path) -> dict[str, str]:
-    relative = "src/harnessbench/usage_proxy.py"
-    return {relative: _file_sha256(harnessbench_root / relative)}
+    relative_paths = (
+        "src/harnessbench/adapters/base.py",
+        "src/harnessbench/adapters/deepseek_writer_director.py",
+        "src/harnessbench/registry.py",
+        "src/harnessbench/runner.py",
+        "src/harnessbench/usage_proxy.py",
+    )
+    return {
+        relative: _file_sha256(harnessbench_root / relative)
+        for relative in relative_paths
+    }
 
 
 def _load_environment(env_file: Path) -> dict[str, str]:
@@ -586,6 +596,29 @@ def _find_result_file(results_root: Path, task_id: str) -> Path | None:
     return valid[0] if valid else None
 
 
+def _archive_retry_evidence(
+    output_dir: Path,
+    *,
+    repeat: int,
+    task_id: str,
+    result_file: Path,
+    log_file: Path,
+) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    archive_dir = (
+        output_dir
+        / "retry-history"
+        / f"repeat-{repeat:02d}"
+        / task_id
+        / timestamp
+    )
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(result_file, archive_dir / result_file.name)
+    if log_file.is_file():
+        shutil.copy2(log_file, archive_dir / log_file.name)
+    return archive_dir
+
+
 def _adapter_round_payloads(
     payload: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -679,16 +712,17 @@ def _classify_result(payload: Mapping[str, Any]) -> str:
     adapter = payload.get("adapter_result")
     if isinstance(oracle, dict) and oracle.get("error"):
         return "oracle_failed"
-    if isinstance(adapter, dict) and adapter.get("ok") is False:
-        return "deepseek_harness_process_failed"
     if "agent_task_failed" in _adapter_statuses(payload):
         return "agent_task_failed"
+    if isinstance(adapter, dict) and adapter.get("ok") is False:
+        return "deepseek_harness_process_failed"
     return "completed"
 
 
 def _resume_should_retry(payload: Mapping[str, Any]) -> bool:
     return _classify_result(payload) in {
         "deepseek_harness_process_failed",
+        "agent_task_failed",
         "oracle_failed",
     }
 
@@ -1057,51 +1091,19 @@ def _run_suite(args: argparse.Namespace) -> int:
         "grading_mode": run_config["grading"]["mode"],
     }
     harness_config = output_dir / "harness.local.json"
-    wrapper = Path(__file__).resolve()
-    python = project_root / ".venv/bin/python"
-    if not python.is_file():
-        raise ValueError(f"project virtualenv Python not found: {python}")
-    adapter_args = [
-        str(wrapper),
-        "adapter",
-        "--workspace",
-        "{workspace}",
-        "--sandbox",
-        "{sandbox}",
-        "--prompt-file",
-        "{prompt_file}",
-        "--session-id",
-        "{session_id}",
-        "--task-id",
-        "{task_id}",
-        "--model",
-        args.model,
-        "--api-timeout-sec",
-        str(args.api_timeout_sec),
-        "--env-file",
-        str(env_file),
-    ]
-    adapter_args.extend(
-        [
-            "--writer-workspace-root",
-            str(args.writer_workspace_root),
-            "--writer-model",
-            str(args.writer_model or args.model),
-        ]
-    )
-    if args.director_harness_enabled:
-        adapter_args.append("--director-harness-enabled")
     _write_json(
         harness_config,
         {
             "models": {
                 "deepseek-harness-writer-director": {
-                    "adapter": "generic_cli",
-                    "command": str(python),
+                    "adapter": "deepseek_writer_director",
                     "session_prefix": "harnessbench-deepseek",
                     "model": args.model,
+                    "writer_model": str(args.writer_model or args.model),
+                    "project_root": str(project_root),
+                    "api_timeout_sec": args.api_timeout_sec,
+                    "director_harness_enabled": bool(args.director_harness_enabled),
                     "timeout_sec": 2400,
-                    "args": adapter_args,
                 }
             }
         },
@@ -1112,6 +1114,21 @@ def _run_suite(args: argparse.Namespace) -> int:
     task_runs = state.get("task_runs")
     if not isinstance(task_runs, list):
         task_runs = []
+    if args.resume:
+        resume_history = state.get("resume_history")
+        if not isinstance(resume_history, list):
+            resume_history = []
+        resume_history.append(
+            {
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "adapter": "deepseek_writer_director",
+                "deepseek_harness_project_git": _git_metadata(project_root),
+                "deepseek_harness_source_sha256": _source_hashes(project_root),
+                "harnessbench_source_sha256": _harnessbench_source_hashes(harnessbench_root),
+            }
+        )
+        state["resume_history"] = resume_history
+        _write_json(state_path, state)
     exit_code = 0
     for repeat in range(1, args.repeats + 1):
         repeat_dir = output_dir / f"repeat-{repeat:02d}"
@@ -1149,9 +1166,16 @@ def _run_suite(args: argparse.Namespace) -> int:
                     )
                 existing_payload = _read_json(existing_result)
                 if _resume_should_retry(existing_payload):
+                    archived_at = _archive_retry_evidence(
+                        output_dir,
+                        repeat=repeat,
+                        task_id=task_id,
+                        result_file=existing_result,
+                        log_file=repeat_dir / "logs" / f"{task_id}.log",
+                    )
                     print(
                         f"[deepseek-harnessbench] repeat {repeat}/{args.repeats} "
-                        f"retrying failed {task_id}",
+                        f"retrying failed {task_id} archived={archived_at}",
                         flush=True,
                     )
                 else:
